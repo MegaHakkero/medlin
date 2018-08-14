@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+
+ED_LINES=()
+ED_INDEX=0
+ED_NOT_AT_END=0
+
+ED_CURS_X=0
+ED_CURS_Y=0
+
+get_curs() {
+	exec < /dev/tty
+	local ostty="$(stty -g)"
+	stty raw -echo min 0
+	printf "\e[6n" > /dev/tty
+	local apos
+	IFS=";" read -rd R -a apos
+	stty $ostty
+	ED_CURS_X=$((${apos[1]} - 1))
+	ED_CURS_Y=$((${apos[0]:2} - 1))
+}
+
+moveup() {
+	local cnt=1
+	(( $# )) && cnt=$1
+	tput cuu $cnt
+}
+
+movedn() {
+	local cnt=1
+	(( $# )) && cnt=$1
+	tput cud $cnt
+}
+
+rmline() {
+	printf "\r"
+	tput el
+}
+
+moveup_el() {
+	local cnt=1
+	(( $# )) && cnt=$1
+	local i
+	for (( i = 0; i < cnt; i++ )); do
+		moveup
+		rmline
+	done
+}
+
+movedn_el() {
+	local cnt=1
+	(( $# )) && cnt=$1
+	local i
+	for (( i = 0; i < cnt; i++ )); do
+		movedn
+		rmline
+	done
+}
+
+rmbufline() {
+	local line=$1
+	if (( line == (ED_INDEX - 1) )); then
+		unset ED_LINES[$((--ED_INDEX))]
+		return 0
+	fi
+	ED_LINES=("${ED_LINES[@]::$line}" "${ED_LINES[@]:$((line + 1))}")
+}
+
+insbufline() {
+	local lnum=$1
+	if (( lnum == ED_INDEX )); then
+		ED_LINES[$((ED_INDEX++))]=""
+		return 0
+	fi
+	ED_LINES=("${ED_LINES[@]::$lnum}" "" "${ED_LINES[@]:$lnum}")
+}
+
+print_lines() {
+	local IFS=$'\n'
+	echo "${ED_LINES[*]}"
+}
+
+error() {
+	echo -en "$1\nPress enter... "
+	read
+	moveup_el 3
+}
+
+# remove given line or the last one
+ed_del() {
+	local -i line=$((ED_INDEX - 1))
+	if (( $# )); then
+		line=$1
+		if (( !line )); then
+			error "not a number: $1"
+			return 1
+		fi
+		if (( line < 0 )) || (( line > (ED_INDEX - 1) )); then
+			error "line number out of bounds: $1"
+			return 1
+		fi
+	fi
+	rmbufline $line
+	tput rc
+	tput ed
+	print_lines
+}
+
+# insert line
+ed_ins() {
+	local -i line=$ED_INDEX
+	if (( $# )); then
+		line=$1
+		if (( !line )); then
+			error "not a number: $1"
+			return 1
+		fi
+		if (( line < 0 )) || (( line > ED_INDEX )); then
+			error "line number out of bounds: $1"
+			return 1
+		fi
+	fi
+	insbufline $line
+	ED_INDEX=$line
+	tput rc
+	tput ed
+	print_lines
+	get_curs
+	moveup $((${#ED_LINES[@]} - line))
+	ED_NOT_AT_END=1
+}
+
+# edit line
+ed_ed() {
+	local -i line=$((ED_INDEX - 1))
+	if (( $# )); then
+		line=$1
+		if (( !line )); then
+			error "not a number: $1"
+			return 1
+		fi
+		if (( line < 0 )) || (( line > (ED_INDEX - 1) )); then
+			error "line number out of bounds: $1"
+			return 1
+		fi
+	fi
+	ED_INDEX=$line
+	get_curs
+	moveup $((${#ED_LINES[@]} - line))
+	rmline
+	ed_inject "${ED_LINES[$ED_INDEX]}" # TODO: write program for TIOCSTI
+	unset ED_LINES[$line]
+	ED_NOT_AT_END=1
+}
+
+# print buffer
+ed_print() {
+	error "$(print_lines)"$'\n'
+	moveup_el ${#ED_LINES[@]}
+}
+
+tput smcup
+tput home
+tput ed
+tput sc
+history -c
+line=""
+ctrl_d=0
+while :; do
+	read -er line
+	if (( $? )); then
+		ctrl_d=1
+		break
+	fi
+	history -s "$line"
+	[[ "$line" == "//end" ]] && break
+	if [[ "${line::2}" == "//" ]]; then
+		if (( ${#line} < 3 )); then
+			error "no command provided"
+			continue
+		fi
+		eval "ed_${line:2}"
+		continue
+	fi
+	ED_LINES[$((ED_INDEX++))]="$line"
+	if (( ED_NOT_AT_END )); then
+		ED_INDEX=${#ED_LINES[@]}
+		ED_NOT_AT_END=0
+		tput cup "$ED_CURS_Y" "$ED_CURS_X"
+	fi
+done
+(( !${#ED_LINES[@]} )) && return
+(( !$ctrl_d )) && moveup_el
+tput rmcup
+print_lines
